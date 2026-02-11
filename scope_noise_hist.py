@@ -1,15 +1,19 @@
-import re
-import time
+import argparse
 import math
+import re
+import sys
+import time
 from dataclasses import dataclass
+from pathlib import Path
 
-import serial
 import matplotlib.pyplot as plt
+import serial
 
 
 @dataclass
 class Waveform:
     volts: list[float]
+    raw_int16: list[int]
 
 
 class GDSMemoryReader:
@@ -44,7 +48,6 @@ class GDSMemoryReader:
                 return None
 
             p = i + len(marker)
-
             if p >= len(self.buf):
                 return None
 
@@ -55,7 +58,7 @@ class GDSMemoryReader:
             if p + n_digits > len(self.buf):
                 return None
 
-            self.length = int(self.buf[p:p + n_digits].decode("ascii"))
+            self.length = int(self.buf[p : p + n_digits].decode("ascii"))
             p += n_digits
 
             # Alles bis zum Beginn der Rohdaten entfernen
@@ -68,20 +71,23 @@ class GDSMemoryReader:
         if len(self.buf) < self.length:
             return None
 
-        raw = self.buf[:self.length]
-        self.buf = self.buf[self.length:]
+        raw = self.buf[: self.length]
+        self.buf = self.buf[self.length :]
         self.waiting_for_data = False
 
         # 4) Rohdaten: je 2 Byte => signed int16 (big-endian)
-        # Umrechnung laut Manual: (raw/25) * VerticalScale
+        # Umrechnung: (raw/25) * VerticalScale
         AD_FACTOR = 25.0
 
+        raw_int16: list[int] = []
         volts: list[float] = []
+
         for i in range(0, len(raw), 2):
-            val = int.from_bytes(raw[i:i+2], byteorder="big", signed=True)
+            val = int.from_bytes(raw[i : i + 2], byteorder="big", signed=True)
+            raw_int16.append(val)
             volts.append((val / AD_FACTOR) * self.vertical_scale)
 
-        return Waveform(volts=volts)
+        return Waveform(volts=volts, raw_int16=raw_int16)
 
 
 def mean(xs: list[float]) -> float:
@@ -89,28 +95,29 @@ def mean(xs: list[float]) -> float:
 
 
 def stddev_sample(xs: list[float]) -> float:
-    # empirische Standardabweichung (Stichprobe): ddof=1
     mu = mean(xs)
     s2 = sum((x - mu) ** 2 for x in xs) / (len(xs) - 1)
     return math.sqrt(s2)
 
 
 def gaussian_pdf(x: float, mu: float, sigma: float) -> float:
-    return (1.0 / (sigma * math.sqrt(2.0 * math.pi))) * math.exp(-0.5 * ((x - mu) / sigma) ** 2)
+    return (1.0 / (sigma * math.sqrt(2.0 * math.pi))) * math.exp(
+        -0.5 * ((x - mu) / sigma) ** 2
+    )
 
 
-def read_waveform_once(port: str, baud: int = 115200, channel: int = 1, timeout_s: float = 5.0) -> Waveform:
+def read_waveform_once(
+    port: str, baud: int = 115200, channel: int = 1, timeout_s: float = 5.0
+) -> Waveform:
     reader = GDSMemoryReader()
 
     with serial.Serial(port, baudrate=baud, timeout=0.1) as ser:
+
         def send(cmd: str) -> None:
             ser.write((cmd + "\n").encode("ascii"))
             ser.flush()
 
-        # Header einschalten, damit Vertical Scale etc. sicher mitkommen
         send(":HEADer ON")
-
-        # Daten anfordern (abgekürzte SCPI-Form ist üblich)
         send(f":ACQ{channel}:MEM?")
 
         t0 = time.time()
@@ -121,45 +128,129 @@ def read_waveform_once(port: str, baud: int = 115200, channel: int = 1, timeout_
                 if wf is not None:
                     return wf
             if time.time() - t0 > timeout_s:
-                raise TimeoutError("Timeout: keine vollständigen Daten vom Oszilloskop erhalten.")
+                raise TimeoutError(
+                    "Timeout: keine vollständigen Daten vom Oszilloskop erhalten."
+                )
 
 
 def plot_hist_and_gauss(values: list[float], bins: int = 50) -> None:
     mu = mean(values)
     sigma = stddev_sample(values)
 
-    # Histogramm zeichnen (Counts)
+    vmin = min(values)
+    vmax = max(values)
+    uniq = len(set(values))
+    print(
+        f"N={len(values)}  min={vmin:.6g}  max={vmax:.6g}  unique={uniq}  µ={mu:.6g}  σ={sigma:.6g}"
+    )
+
     counts, bin_edges, _ = plt.hist(values, bins=bins)
 
-    # Bin-Mitten und Bin-Breite
-    bin_width = bin_edges[1] - bin_edges[0]
-    centers = [(bin_edges[i] + bin_edges[i+1]) / 2 for i in range(len(bin_edges) - 1)]
+    if sigma == 0.0:
+        plt.title(
+            "Histogramm (σ=0: alle Messwerte identisch – kein sichtbares Rauschen / keine Änderung)"
+        )
+        plt.xlabel("Spannung [V]")
+        plt.ylabel("Anzahl pro Bin")
+        plt.show()
+        return
 
-    # Gausskurve auf Counts skalieren: N * bin_width * pdf(x)
+    bin_width = bin_edges[1] - bin_edges[0]
+    centers = [
+        (bin_edges[i] + bin_edges[i + 1]) / 2 for i in range(len(bin_edges) - 1)
+    ]
+
     N = len(values)
     gauss_y = [N * bin_width * gaussian_pdf(x, mu, sigma) for x in centers]
-
     plt.plot(centers, gauss_y)
 
     plt.title("Rauschen: Histogramm und Gauss-Fit (µ, σ aus Messdaten)")
     plt.xlabel("Spannung [V]")
     plt.ylabel("Anzahl pro Bin")
-
-    # Kurze Info ins Diagramm
-    plt.text(0.02, 0.98, f"µ = {mu:.6g} V\nσ = {sigma:.6g} V\nN = {N}",
-             transform=plt.gca().transAxes, va="top")
-
+    plt.text(
+        0.02,
+        0.98,
+        f"µ = {mu:.6g} V\nσ = {sigma:.6g} V\nN = {N}",
+        transform=plt.gca().transAxes,
+        va="top",
+    )
     plt.show()
 
 
-def main() -> None:
-    # >>> ANPASSEN <<<
-    port = "COM5"   # Windows z.B. COM5, Linux z.B. /dev/ttyACM0
+def write_csv(path: Path, wf: Waveform) -> None:
+    if path.exists():
+        raise FileExistsError(f"CSV-Datei existiert bereits: {path}")
 
-    wf = read_waveform_once(port=port, channel=1)
-    plot_hist_and_gauss(wf.volts, bins=60)
+    # Sicherstellen, dass das Zielverzeichnis existiert (falls angegeben)
+    if path.parent != Path("."):
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+    with path.open("x", encoding="utf-8", newline="\n") as f:
+        f.write("index,raw_int16,volts\n")
+        for i, (raw, v) in enumerate(zip(wf.raw_int16, wf.volts)):
+            f.write(f"{i},{raw},{v}\n")
+
+
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(
+        description="Liest CH-Daten vom GDS-1000B und plottet Histogramm + Gausskurve."
+    )
+    p.add_argument(
+        "--port",
+        default="/dev/ttyACM0",
+        help="Serieller Port, z.B. /dev/ttyACM0 oder COM5",
+    )
+    p.add_argument("--baud", type=int, default=115200, help="Baudrate (Default 115200)")
+    p.add_argument("--channel", type=int, default=1, help="Kanalnummer (Default 1)")
+    p.add_argument(
+        "--timeout",
+        type=float,
+        default=5.0,
+        help="Timeout in Sekunden für die Messdaten (Default 5.0)",
+    )
+    p.add_argument(
+        "--bins", type=int, default=60, help="Histogramm-Bins (Default 60)"
+    )
+    p.add_argument(
+        "--csv",
+        metavar="DATEI",
+        help="Speichert alle Rohdaten als CSV (index, raw_int16, volts). Überschreibt nicht.",
+    )
+    return p.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+
+    wf = read_waveform_once(
+        port=args.port, baud=args.baud, channel=args.channel, timeout_s=args.timeout
+    )
+
+    print(
+        "raw unique:",
+        len(set(wf.raw_int16)),
+        "raw min/max:",
+        min(wf.raw_int16),
+        max(wf.raw_int16),
+    )
+
+    if args.csv:
+        try:
+            write_csv(Path(args.csv), wf)
+            print(f"CSV geschrieben: {args.csv}")
+        except FileExistsError as e:
+            print(f"ERROR: {e}", file=sys.stderr)
+            sys.exit(2)
+
+    plt.figure()
+    plt.plot(wf.volts)
+    plt.title("Zeitreihe (Sample-Index)")
+    plt.xlabel("Sample")
+    plt.ylabel("Spannung [V]")
+    plt.show()
+
+    plot_hist_and_gauss(wf.volts, bins=args.bins)
 
 
 if __name__ == "__main__":
     main()
-
