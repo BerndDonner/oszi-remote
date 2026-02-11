@@ -18,6 +18,15 @@
       };
 
       pythonDev = import (nixos-config + "/lib/python-develop.nix");
+
+      python = pkgs.python3.withPackages (ps: [
+        ps.pyserial
+        ps.matplotlib
+        ps.debugpy
+        ps.black
+        ps.isort
+      ]);
+
     in
     {
       devShells.${system}.default = pythonDev {
@@ -26,18 +35,9 @@
         checkInputs = [ "nixos-config" ];
         flakeLockPath = ./flake.lock;
         symbol = "🐍";               # Symbol bleibt gleich
-        pythonVersion = pkgs.python3;
+        pythonVersion = python;
 
         extraPackages = with pkgs; [
-          # Messtechnik / Oszi
-          python3Packages.pyserial
-          python3Packages.matplotlib
-
-          # Dev-Qualität (optional, aber nützlich)
-          python3Packages.debugpy
-          python3Packages.black
-          python3Packages.isort
-
           # Für Continue Plugin / VSCode
           vscode-fhs
         ];
