@@ -24,7 +24,7 @@ pyinstaller ^
   --onefile ^
   --name oszi-remote ^
   --collect-all matplotlib ^
-  -m scope_noise_hist || goto :err
+  oszi_remote_entry.py || goto :err
 
 echo.
 echo Build OK: dist\oszi-remote.exe
