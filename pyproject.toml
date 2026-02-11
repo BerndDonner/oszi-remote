@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "oszi-remote"
+version = "0.1.0"
+description = "GDS-1000B: Memory-Waveform lesen und Noise-Histogramm anzeigen"
+requires-python = ">=3.11"
+dependencies = [
+  "matplotlib>=3.8",
+  "pyserial>=3.5",
+]
+
+[project.scripts]
+oszi-remote = "scope_noise_hist.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
