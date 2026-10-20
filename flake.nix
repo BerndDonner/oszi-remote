@@ -17,7 +17,7 @@
         ];
       };
 
-      pythonDev = import (nixos-config + "/lib/python-develop.nix");
+      pythonDev = nixos-config.lib.mkPythonDevShell;
 
       python = pkgs.python3.withPackages (ps: [
         ps.pyserial
